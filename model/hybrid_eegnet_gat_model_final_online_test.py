@@ -10,7 +10,7 @@ import seaborn as sns
 from torch.utils.data import Dataset
 from torch_geometric.nn import GATConv, global_mean_pool
 from sklearn.metrics import confusion_matrix, classification_report, roc_curve, auc
-from model.hybrid_eegnet_gat_model_final import create_edge_index, compute_adjacency
+from hybrid_eegnet_gat_model_final import create_edge_index, compute_adjacency
 
 
 ###########################################
@@ -157,10 +157,10 @@ class EEGDataset(Dataset):
 ###########################################
 
 if __name__ == "__main__":
-    data_root = "/Users/taniyashuba/PycharmProjects/eeg-transformer-gnn/data/preproc_clips"  # Укажите путь к данным
+    data_root = "/Users/taniyashuba/PycharmProjects/eeg-transformer-gnn/data/preproc_clips_no_filter"  # Укажите путь к данным
     # Обратите внимание: замените model_path на корректный путь к сохранённой модели Hybrid_EEG_GNN,
     # например "/Users/taniyashuba/PycharmProjects/eeg-transformer-gnn/model/hybrid_eeg_gnn_model_final.pth"
-    model_path = "/Users/taniyashuba/PycharmProjects/eeg-transformer-gnn/model/hybrid_eeg_gnn_model_final.pth"
+    model_path = "/Users/taniyashuba/PycharmProjects/eeg-transformer-gnn/model/hybrid_eegnet_gat_model_final.pth"
     n_channels = 19
     n_samples = 500
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -168,7 +168,40 @@ if __name__ == "__main__":
     # Инициализация модели
     model = Hybrid_EEG_GNN(n_channels=n_channels, n_samples=n_samples, dropout_rate=0.5,
                            gcn_channels=32, gat_heads=4, num_classes=2)
-    model.load_state_dict(torch.load(model_path, map_location=device))
+    # вместо model.load_state_dict(torch.load(model_path, map_location=device))
+    checkpoint = torch.load(model_path, map_location=device)
+    new_ckpt = {}
+
+    # 1) Переименуем ключи из старой контрольной точки
+    for k, v in checkpoint.items():
+        nk = k
+        # classifier → fc
+        if nk.startswith("classifier."):
+            nk = nk.replace("classifier.", "fc.")
+        # graph_block.bn1 → graph_block.gat1_bn
+        if nk.startswith("graph_block.bn1."):
+            nk = nk.replace("graph_block.bn1.", "graph_block.gat1_bn.")
+        # graph_block.bn2 → graph_block.gat2_bn
+        if nk.startswith("graph_block.bn2."):
+            nk = nk.replace("graph_block.bn2.", "graph_block.gat2_bn.")
+        new_ckpt[nk] = v
+
+    # 2) Отфильтруем только те параметры, которые есть в модели и совпадают по форме
+    model_dict = model.state_dict()
+    loaded_dict = {}
+    for k, v in new_ckpt.items():
+        if k in model_dict:
+            if v.size() == model_dict[k].size():
+                loaded_dict[k] = v
+            else:
+                print(f"SKIP {k}: shape {v.size()} != {model_dict[k].size()}")
+        else:
+            print(f"SKIP {k}: unexpected key")
+
+    # 3) Обновляем state_dict и загружаем
+    model_dict.update(loaded_dict)
+    model.load_state_dict(model_dict)
+    print(f"Loaded {len(loaded_dict)}/{len(model_dict)} parameters from checkpoint.")
     model = model.to(device)
     model.eval()
 

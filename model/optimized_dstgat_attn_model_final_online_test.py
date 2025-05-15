@@ -13,7 +13,7 @@ from optimized_dstgat_attn_model_final import Optimized_DSTGAT_Attn, EEGDataset,
 
 if __name__ == "__main__":
     # Задание путей и параметров
-    data_root = "/Users/taniyashuba/PycharmProjects/eeg-transformer-gnn/data/preproc_clips"  # путь к данным
+    data_root = "/Users/taniyashuba/PycharmProjects/eeg-transformer-gnn/data/preproc_clips_no_filter"  # путь к данным
     model_path = "/Users/taniyashuba/PycharmProjects/eeg-transformer-gnn/model/optimized_dstgat_attn_model_final.pth"  # путь к сохранённой модели
     n_channels = 19
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

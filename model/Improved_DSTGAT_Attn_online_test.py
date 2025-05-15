@@ -195,7 +195,7 @@ class EEGDataset(Dataset):
 
 if __name__ == "__main__":
     # Параметры
-    data_root = "/Users/taniyashuba/PycharmProjects/eeg-transformer-gnn/data/preproc_clips"
+    data_root = "/Users/taniyashuba/PycharmProjects/eeg-transformer-gnn/data/preproc_clips_no_filter"
     model_path = "/Users/taniyashuba/PycharmProjects/eeg-transformer-gnn/model/improved_dstgcn_model_final.pth"
     n_channels = 19
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

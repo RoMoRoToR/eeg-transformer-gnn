@@ -38,7 +38,28 @@ if __name__ == "__main__":
         noise_sigma=0.0,   # при тесте без добавления шума
         dropout=0.0        # отключаем дропаут при инференсе
     ).to(device)
-    model.load_state_dict(torch.load(model_path, map_location=device))
+    # 1) Загрузим чекпойнт
+    loaded_ckpt = torch.load(model_path, map_location=device)
+
+    # 2) Вытянем state_dict текущей модели
+    model_dict = model.state_dict()
+
+    # 3) Отфильтруем только совпадающие по имени и по форме параметры
+    filtered_ckpt = {}
+    for k, v in loaded_ckpt.items():
+        if k in model_dict and v.size() == model_dict[k].size():
+            filtered_ckpt[k] = v
+        else:
+            # вы можете раскомментировать следующую строку,
+            # чтобы увидеть, какие ключи пропускаются
+            # print(f"SKIP {k}: loaded shape={v.size()} vs model shape={model_dict.get(k, 'MISSING')}")
+            pass
+
+    # 4) Объединим и загрузим
+    model_dict.update(filtered_ckpt)
+    model.load_state_dict(model_dict)
+
+    print(f"✅ Loaded {len(filtered_ckpt)}/{len(model_dict)} parameters from checkpoint")
     model.eval()
 
     ############################
