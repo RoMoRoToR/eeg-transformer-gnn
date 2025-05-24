@@ -2,7 +2,5 @@
 <project version="4">
   <component name="VcsDirectoryMappings">
     <mapping directory="" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/data/ds004504" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/eeg-gnn-ssl" vcs="Git" />
   </component>
 </project>

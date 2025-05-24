@@ -4,190 +4,126 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
-import seaborn as sns
-from sklearn.metrics import confusion_matrix, classification_report, roc_curve, auc
-from torch.utils.data import Dataset
+from sklearn.metrics import (
+    confusion_matrix,
+    classification_report,
+    roc_curve,
+    auc
+)
+from torch_geometric.nn import global_mean_pool
+from torch.utils.data import DataLoader
 
-# Импортируем вашу улучшенную модель и утилиты
-from RobustHybridEEGModelV2 import (
-    RobustHybridEEGModelV2,
+# Импорт вашего определения модели и датасета
+from model.RobustHybridEEGModelV3 import (
+    HybridEEGGraphModel,
     EEGDataset,
     compute_adjacency,
-    create_edge_index
+    create_edge_index,
+    CONFIG,
+    SFREQ,
+    SUBCLIP_LEN
 )
 
 if __name__ == "__main__":
-    ############################
-    # Настройки
-    ############################
-    data_root  = "/Users/taniyashuba/PycharmProjects/eeg-transformer-gnn/data/preproc_clips_no_filter"
-    model_path = "/Users/taniyashuba/PycharmProjects/eeg-transformer-gnn/model/best_model_v2.pth"
-    n_channels = 19
-    device     = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # Параметры
+    data_root   = "preproc_clips_test"        # папка с .npz файлами тестовой выборки
+    model_path  = "best_model_91%.pt"        # путь к сохранённой модели
+    channel_names = [
+        'Fp1','Fp2','F7','F3','Fz','F4','F8',
+        'T3','C3','Cz','C4','T4','T5','P3',
+        'Pz','P4','T6','O1','O2'
+    ]
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    ############################
-    # Загрузка модели
-    ############################
-    model = RobustHybridEEGModelV2(
-        n_channels=n_channels,
-        n_samples=500,
-        feat_dim=16,
-        gcn_hidden=64,
-        heads=8,
-        num_classes=2,
-        noise_sigma=0.0,   # при тесте без добавления шума
-        dropout=0.0        # отключаем дропаут при инференсе
+    # 1) Готовим Dataset
+    test_ds    = EEGDataset(data_root, channel_names, augment=False)
+    print(f"Всего клипов в тесте: {len(test_ds)}")
+
+    # 2) Строим графовую структуру
+    adj        = compute_adjacency(channel_names)
+    edge_index = create_edge_index(adj, 0.2).to(device)
+
+    # 3) Загружаем модель (с тем же bp_dim, с которым она обучалась)
+    model = HybridEEGGraphModel(
+        n_ch=len(channel_names),
+        feat_dim=32,
+        spat_dim=32,
+        bp_dim=8,                # ← bp_dim=4, как при обучении
+        gcn_h=128,
+        heads=4,
+        dropout=CONFIG['dropout']
     ).to(device)
-    # 1) Загрузим чекпойнт
-    loaded_ckpt = torch.load(model_path, map_location=device)
-
-    # 2) Вытянем state_dict текущей модели
-    model_dict = model.state_dict()
-
-    # 3) Отфильтруем только совпадающие по имени и по форме параметры
-    filtered_ckpt = {}
-    for k, v in loaded_ckpt.items():
-        if k in model_dict and v.size() == model_dict[k].size():
-            filtered_ckpt[k] = v
-        else:
-            # вы можете раскомментировать следующую строку,
-            # чтобы увидеть, какие ключи пропускаются
-            # print(f"SKIP {k}: loaded shape={v.size()} vs model shape={model_dict.get(k, 'MISSING')}")
-            pass
-
-    # 4) Объединим и загрузим
-    model_dict.update(filtered_ckpt)
-    model.load_state_dict(model_dict)
-
-    print(f"✅ Loaded {len(filtered_ckpt)}/{len(model_dict)} parameters from checkpoint")
+    model.load_state_dict(torch.load(model_path, map_location=device))
     model.eval()
+    print("Модель загружена, режим eval().")
 
-    ############################
-    # Графовые данные
-    ############################
-    adj        = compute_adjacency(n_channels)
-    edge_index = create_edge_index(adj, threshold=0.3).to(device)
+    # 4) Проверка устойчивости к шуму
+    noise_levels = np.arange(0.1, 1.0, 0.1)
+    accuracies   = []
+    aucs         = []
 
-    ############################
-    # Датасет
-    ############################
-    dataset = EEGDataset(data_root, augment=False)
+    for sigma in noise_levels:
+        preds = []
+        trues = []
+        probs = []
+        latencies = []
 
-    ############################
-    # Онлайн-тест
-    ############################
-    preds_list, labels_list, probs_list, latencies = [], [], [], []
+        for idx in range(len(test_ds)):
+            clip, bp, label = test_ds[idx]
+            # добавляем гауссов шум
+            noise = torch.randn_like(clip) * sigma
+            clip_noisy = clip + noise
 
-    print("Начало онлайн-тестирования RobustHybridEEGModelV2...")
-    for i, (clip, label) in enumerate(dataset):
-        # clip: [C, T] → [1, C, T]
-        clip = clip.unsqueeze(0).to(device)
-        label = torch.tensor(label, device=device)
+            clip_noisy = clip_noisy.unsqueeze(0).to(device)  # [1, C, T]
+            bp_tensor  = bp.unsqueeze(0).to(device)
+            label_int  = int(label)
 
-        # batch_index для графового блока: [0,0,...,0] длины C
-        B = clip.size(0)
-        batch_idx = torch.arange(B, device=device)\
-                        .unsqueeze(1)\
-                        .repeat(1, n_channels)\
-                        .view(-1)
+            start = time.time()
+            with torch.no_grad():
+                B, C, T = clip_noisy.shape
+                batch_idx = (
+                    torch.arange(B, device=device)
+                         .unsqueeze(1)
+                         .repeat(1, C)
+                         .view(-1)
+                )
+                logits = model(clip_noisy, bp_tensor, edge_index, batch_idx)
+            latencies.append(time.time() - start)
 
-        start = time.time()
-        with torch.no_grad():
-            logits = model(clip, edge_index, batch_idx)
-        latency = time.time() - start
+            prob = F.softmax(logits, dim=1)[0,1].item()
+            pred = logits.argmax(dim=1).item()
 
-        prob = F.softmax(logits, dim=1)[0,1].item()
-        pred = logits.argmax(dim=1)[0].item()
+            preds.append(pred)
+            trues.append(label_int)
+            probs.append(prob)
 
-        latencies.append(latency)
-        probs_list.append(prob)
-        preds_list.append(pred)
-        labels_list.append(label.item())
+        # метрики для данного σ
+        total = len(trues)
+        acc   = sum(p==t for p,t in zip(preds, trues)) / total
+        fpr, tpr, _ = roc_curve(trues, probs)
+        roc_auc     = auc(fpr, tpr)
 
-        print(f"[{i+1}/{len(dataset)}] Предсказание: {pred}, Истинно: {label.item()}, Время: {latency:.4f} с")
+        accuracies.append(acc)
+        aucs.append(roc_auc)
 
-    ############################
-    # Итоговые метрики
-    ############################
-    accuracy    = 100.0 * np.mean([p==l for p,l in zip(preds_list, labels_list)])
-    avg_latency = np.mean(latencies)
+        print(f"σ={sigma:.1f} → Accuracy: {acc*100:.2f}%, AUC: {roc_auc:.3f}, "
+              f"avg latency: {np.mean(latencies):.3f}s")
 
-    print(f"\nОнлайн-тест завершён.")
-    print(f"Точность: {accuracy:.2f}%")
-    print(f"Средняя задержка: {avg_latency:.4f} сек")
-
-    ############################
-    # 1. Confusion Matrix & Classification Report
-    ############################
-    cm = confusion_matrix(labels_list, preds_list)
-    print("\nConfusion Matrix:\n", cm)
-    print("\nClassification Report:\n",
-          classification_report(labels_list, preds_list, target_names=["Class 0","Class 1"]))
-
-    plt.figure(figsize=(5,4))
-    sns.heatmap(cm, annot=True, fmt="d", cmap="Blues",
-                xticklabels=["0","1"], yticklabels=["0","1"])
-    plt.title("Confusion Matrix")
-    plt.xlabel("Предсказано")
-    plt.ylabel("Истинно")
+    # 5) Визуализация зависимости качества от шума
+    plt.figure(figsize=(6,4))
+    plt.plot(noise_levels, np.array(accuracies)*100, marker='o')
+    plt.title("Accuracy vs Gaussian Noise σ")
+    plt.xlabel("σ")
+    plt.ylabel("Accuracy (%)")
+    plt.grid(True)
+    plt.tight_layout()
     plt.show()
 
-    ############################
-    # 2. Latency per Clip
-    ############################
-    plt.figure()
-    plt.plot(range(1,len(latencies)+1), latencies, marker='o')
-    plt.title("Задержка обработки по клипам")
-    plt.xlabel("Индекс клипа")
-    plt.ylabel("Latency (сек)")
+    plt.figure(figsize=(6,4))
+    plt.plot(noise_levels, aucs, marker='o')
+    plt.title("AUC vs Gaussian Noise σ")
+    plt.xlabel("σ")
+    plt.ylabel("AUC")
     plt.grid(True)
-    plt.show()
-
-    ############################
-    # 3. Гистограмма Latencies
-    ############################
-    plt.figure()
-    plt.hist(latencies, bins=20, edgecolor='black')
-    plt.title("Гистограмма задержек")
-    plt.xlabel("Latency (сек)")
-    plt.ylabel("Частота")
-    plt.grid(True)
-    plt.show()
-
-    ############################
-    # 4. ROC-кривая
-    ############################
-    fpr, tpr, _   = roc_curve(labels_list, probs_list)
-    roc_auc       = auc(fpr, tpr)
-
-    plt.figure()
-    plt.plot(fpr, tpr, label=f"AUC = {roc_auc:.2f}")
-    plt.plot([0,1],[0,1],"k--")
-    plt.title("ROC-кривая")
-    plt.xlabel("False Positive Rate")
-    plt.ylabel("True Positive Rate")
-    plt.legend(loc="lower right")
-    plt.grid(True)
-    plt.show()
-
-    ############################
-    # 5. Распределение вероятностей
-    ############################
-    plt.figure()
-    plt.hist(probs_list, bins=20, edgecolor='black')
-    plt.title("Распределение предсказанных вероятностей (класс 1)")
-    plt.xlabel("Probability")
-    plt.ylabel("Частота")
-    plt.grid(True)
-    plt.show()
-
-    ############################
-    # 6. Задержка vs Вероятность
-    ############################
-    plt.figure()
-    plt.scatter(probs_list, latencies, alpha=0.6)
-    plt.title("Latency vs Predicted Probability")
-    plt.xlabel("Predicted Probability (Class 1)")
-    plt.ylabel("Latency (сек)")
-    plt.grid(True)
+    plt.tight_layout()
     plt.show()

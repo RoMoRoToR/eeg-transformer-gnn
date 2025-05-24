@@ -177,3 +177,10 @@ if __name__ == "__main__":
     # Сохраняем веса
     torch.save(model.state_dict(), "robust_hybrid_eeg_model_final.pth")
     print("Обучение завершено и модель сохранена в robust_hybrid_eeg_model_final.pth")
+
+
+if __name__ == "__main__":
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    TRAIN_ROOT = "preproc_clips_train"
+    TEST_ROOT  = "preproc_clips_test"
+    train_on_dirs(TRAIN_ROOT, TEST_ROOT, device)
